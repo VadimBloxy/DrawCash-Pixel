@@ -7,6 +7,8 @@
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Press+Start+2P&family=DM+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.development.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.development.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -58,6 +60,21 @@ button{font-family:'DM Mono',monospace;cursor:pointer}
 .inp{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:9px;padding:11px 14px;color:#fff;font-size:13px;width:100%;display:block;transition:border-color .2s}
 .inp:focus{border-color:rgba(255,107,53,.5)!important;box-shadow:0 0 0 2px rgba(255,107,53,.1)}
 .glass{background:rgba(255,255,255,.03);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+@keyframes notifSlide{from{opacity:0;transform:translateX(120%)}to{opacity:1;transform:translateX(0)}}
+@keyframes trophySpin{0%{transform:rotateY(0deg)}100%{transform:rotateY(360deg)}}
+@keyframes countUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes borderPulse{0%,100%{border-color:rgba(255,107,53,.2)}50%{border-color:rgba(255,107,53,.6)}}
+@keyframes xpBar{from{width:0}to{width:var(--xp-w,50%)}}
+@keyframes challengeBadge{0%{transform:scale(1) rotate(0)}50%{transform:scale(1.12) rotate(-3deg)}100%{transform:scale(1) rotate(0)}}
+.notif-card{animation:notifSlide .3s cubic-bezier(.175,.885,.32,1.275)}
+.xp-bar-fill{animation:xpBar 1s ease .2s both}
+.challenge-active{animation:challengeBadge 2s ease-in-out infinite}
+.rank-row{transition:background .15s,transform .15s}
+.rank-row:hover{background:rgba(255,255,255,.04)!important;transform:translateX(3px)}
+.follow-btn{transition:all .2s}
+.follow-btn:hover{transform:scale(1.05)}
+.stat-card{transition:transform .2s,box-shadow .2s}
+.stat-card:hover{transform:translateY(-3px);box-shadow:0 8px 28px rgba(0,0,0,.4)!important}
 </style>
 </head>
 <body>
@@ -66,32 +83,143 @@ button{font-family:'DM Mono',monospace;cursor:pointer}
 const {useState,useRef,useEffect,useCallback,useMemo}=React;
 
 /* ════════════════════════════════════════════════════════
-   DB — localStorage
+   FIREBASE CONFIG  — замени на свои данные из консоли
 ════════════════════════════════════════════════════════ */
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyCU4hkZ683ucQ76VGdmSmUh9ArHmg_bInc",
+  authDomain: "drawcash-228.firebaseapp.com",
+  projectId: "drawcash-228",
+  storageBucket: "drawcash-228.firebasestorage.app",
+  messagingSenderId: "588752695676",
+  appId: "1:588752695676:web:e9e7f3e8d057bc582774f9",
+  measurementId: "G-EPP6XK58ML",
+  databaseURL: "https://drawcash-228-default-rtdb.firebaseio.com"
+};
+
+/* ════════════════════════════════════════════════════════
+   DB — Firebase Realtime Database (async)
+   Все данные синхронизируются между всеми браузерами
+════════════════════════════════════════════════════════ */
+// Инициализация Firebase (CDN compat v9)
+const _fbApp   = firebase.initializeApp(FIREBASE_CONFIG);
+const _fbDB    = firebase.database();
+const _ref     = path => _fbDB.ref(path);
+
+// ── in-memory cache (обновляется через realtime listeners) ──
+let _usersCache   = {};
+let _drawingsCache= [];
+let _jamsCache    = [];
+let _cacheReady   = false;
+const _readyCallbacks=[];
+function onCacheReady(fn){ _cacheReady?fn():_readyCallbacks.push(fn); }
+function _markReady(){ if(!_cacheReady){_cacheReady=true;_readyCallbacks.forEach(f=>f());} }
+
+// ── Realtime listeners — подписываемся один раз при загрузке ──
+_ref('users').on('value', snap=>{
+  _usersCache = snap.val()||{};
+  // Firebase ключи не могут содержать "." — email закодирован как emailKey
+  _markReady();
+});
+_ref('drawings').on('value', snap=>{
+  const raw=snap.val()||{};
+  _drawingsCache=Object.values(raw).sort((a,b)=>b.createdAt-a.createdAt);
+});
+_ref('jams').on('value', snap=>{
+  const raw=snap.val()||{};
+  _jamsCache=Object.values(raw).sort((a,b)=>b.createdAt-a.createdAt);
+});
+
+// email → безопасный ключ для Firebase (нет точек, /, #, $, [, ])
+function emailKey(email){ return email.replace(/\./g,'_dot_').replace(/@/g,'_at_'); }
+function keyToEmail(key){ return key.replace(/_dot_/g,'.').replace(/_at_/g,'@'); }
+
 const DB={
-  getUsers()     {try{return JSON.parse(localStorage.getItem('dc:users')||'{}')}catch{return{}}},
-  saveUsers(u)   {try{localStorage.setItem('dc:users',JSON.stringify(u))}catch(e){console.error(e)}},
-  getDrawings()  {try{return JSON.parse(localStorage.getItem('dc:drawings')||'[]')}catch{return[]}},
-  saveDrawings(d){try{localStorage.setItem('dc:drawings',JSON.stringify(d))}catch(e){console.error(e)}},
-  getJams()      {try{return JSON.parse(localStorage.getItem('dc:jams')||'[]')}catch{return[]}},
-  saveJams(j)    {try{localStorage.setItem('dc:jams',JSON.stringify(j))}catch(e){console.error(e)}},
-  getUser(email) {return DB.getUsers()[email]||null},
-  updateUser(email,patch){
-    const u=DB.getUsers();if(!u[email])return null;
-    u[email]={...u[email],...patch};DB.saveUsers(u);return u[email];
+  /* ── синхронные геттеры (из кэша) ── */
+  getUsers()      { return _usersCache; },
+  getDrawings()   { return _drawingsCache; },
+  getJams()       { return _jamsCache; },
+  getUser(email)  { return _usersCache[emailKey(email)]||null; },
+
+  /* ── async writers ── */
+  async saveUser(email, userData){
+    await _ref('users/'+emailKey(email)).set(userData);
+    return userData;
   },
-  ensureAdmin(){
-    const u=DB.getUsers();
-    const entry=Object.values(u).find(x=>x.nick===ADMIN_NICK);
+  async updateUser(email, patch){
+    const key=emailKey(email);
+    const current=_usersCache[key];
+    if(!current) return null;
+    const updated={...current,...patch};
+    await _ref('users/'+key).set(updated);
+    return updated;
+  },
+  async saveDrawing(d){
+    await _ref('drawings/'+d.id).set(d);
+  },
+  async deleteDrawing(id){
+    await _ref('drawings/'+id).remove();
+  },
+  async updateDrawing(id, patch){
+    await _ref('drawings/'+id).update(patch);
+  },
+  async saveJam(j){
+    await _ref('jams/'+j.id).set(j);
+  },
+  async deleteJam(id){
+    await _ref('jams/'+id).remove();
+  },
+  async ensureAdmin(){
+    const entry=Object.values(_usersCache).find(x=>x.nick===ADMIN_NICK);
     if(entry&&!entry.isAdmin){
-      entry.isAdmin=true;entry.adminTitle=true;
-      if(!(entry.inventory||[]).includes('title_legend')){
-        entry.inventory=[...(entry.inventory||[]),'title_legend'];
-        entry.title='title_legend';
+      const patch={isAdmin:true,adminTitle:true};
+      const inv=entry.inventory||[];
+      if(!inv.includes('title_legend')){
+        patch.inventory=[...inv,'title_legend'];
+        patch.title='title_legend';
       }
-      DB.saveUsers(u);
+      await DB.updateUser(keyToEmail(Object.keys(_usersCache).find(k=>_usersCache[k].nick===ADMIN_NICK)),patch);
     }
-  }
+  },
+  /* ── helpers ── */
+  emailKey,keyToEmail,
+  onReady(fn){ onCacheReady(fn); },
+
+  /* ── notifications ── */
+  async addNotif(toUserId, notif){
+    const id='n_'+Date.now()+'_'+Math.random().toString(36).slice(2,6);
+    await _ref('notifs/'+toUserId+'/'+id).set({...notif,id,read:false,createdAt:Date.now()});
+  },
+  async getNotifs(userId){
+    const snap=await _ref('notifs/'+userId).once('value');
+    const raw=snap.val()||{};
+    return Object.values(raw).sort((a,b)=>b.createdAt-a.createdAt);
+  },
+  async markNotifsRead(userId){
+    const snap=await _ref('notifs/'+userId).once('value');
+    const raw=snap.val()||{};
+    const updates={};
+    Object.keys(raw).forEach(k=>{if(!raw[k].read)updates[k+'/read']=true;});
+    if(Object.keys(updates).length)await _ref('notifs/'+userId).update(updates);
+  },
+  async deleteNotif(userId,notifId){
+    await _ref('notifs/'+userId+'/'+notifId).remove();
+  },
+
+  /* ── challenges ── */
+  async getChallenges(){
+    const snap=await _ref('challenges').once('value');
+    return Object.values(snap.val()||{}).sort((a,b)=>b.createdAt-a.createdAt);
+  },
+  async saveChallenge(ch){
+    await _ref('challenges/'+ch.id).set(ch);
+  },
+  async submitChallenge(challengeId, entry){
+    await _ref('challengeEntries/'+challengeId+'/'+entry.id).set(entry);
+  },
+  async getChallengeEntries(challengeId){
+    const snap=await _ref('challengeEntries/'+challengeId).once('value');
+    return Object.values(snap.val()||{}).sort((a,b)=>b.createdAt-a.createdAt);
+  },
 };
 
 /* ════════════════════════════════════════════════════════
@@ -248,17 +376,23 @@ function NickDisplay({userId,nick,size=13}){
   const vip=u?getUserVip(u):{};
   const isAdmin=u?.nick===ADMIN_NICK||u?.isAdmin;
   const badge=u?.badge?SHOP_ITEMS.find(i=>i.id===u.badge)?.emoji:null;
-  const accItem=u?.acc?SHOP_ITEMS.find(i=>i.id===u.acc):null;
+  const isVerified=u?.acc==='acc_verified'||(u?.inventory||[]).includes('acc_verified');
   const titleItem=u?.title?SHOP_ITEMS.find(i=>i.id===u.title):null;
   return(
     <span style={{display:'inline-flex',alignItems:'center',gap:4,flexWrap:'wrap'}}>
       {badge&&<span style={{fontSize:size}}>{badge}</span>}
-      {accItem?.emoji&&<span style={{fontSize:size-1}}>{accItem.emoji}</span>}
       {titleItem&&<span style={{fontSize:size-3,color:titleItem.titleColor||'#888',letterSpacing:.5,opacity:.9}}>[{titleItem.name}]</span>}
       <span
         className={isAdmin?'admin-nick':vip.hasGoldNick?'gold-nick':''}
         style={{fontSize:size,fontWeight:700,color:isAdmin?'#ff2222':vip.hasGoldNick?'#ffd700':'#ddd'}}
       >{nick||u?.nick||'???'}</span>
+      {isVerified&&(
+        <span title="Verified" style={{display:'inline-flex',alignItems:'center',justifyContent:'center',width:size+2,height:size+2,borderRadius:'50%',background:'#1d9bf0',flexShrink:0,lineHeight:1}}>
+          <svg width={size*0.65} height={size*0.65} viewBox="0 0 24 24" fill="none">
+            <path d="M5 13l4 4L19 7" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        </span>
+      )}
     </span>
   );
 }
@@ -413,8 +547,7 @@ function CommentSection({drawingId,currentUser}){
   const [text,setText]=useState('');
 
   const loadComments=()=>{
-    const all=DB.getDrawings();
-    const d=all.find(x=>x.id===drawingId);
+    const d=DB.getDrawings().find(x=>x.id===drawingId);
     setComments(d?.comments||[]);
   };
 
@@ -424,12 +557,11 @@ function CommentSection({drawingId,currentUser}){
     return()=>clearInterval(t);
   },[drawingId]);
 
-  const handleSubmit=()=>{
+  const handleSubmit=async()=>{
     const trimmed=text.trim();
     if(!trimmed)return;
-    const all=DB.getDrawings();
-    const idx=all.findIndex(x=>x.id===drawingId);
-    if(idx===-1)return;
+    const d=DB.getDrawings().find(x=>x.id===drawingId);
+    if(!d)return;
     const comment={
       id:'c_'+Date.now(),
       userId:currentUser.id,
@@ -437,22 +569,21 @@ function CommentSection({drawingId,currentUser}){
       text:trimmed,
       createdAt:Date.now(),
     };
-    all[idx].comments=[...(all[idx].comments||[]),comment];
-    DB.saveDrawings(all);
+    const updated={...d,comments:[...(d.comments||[]),comment]};
+    await DB.saveDrawing(updated);
     setText('');
     loadComments();
   };
 
-  const handleDeleteComment=(cid)=>{
+  const handleDeleteComment=async(cid)=>{
     const isAdmin=currentUser.nick===ADMIN_NICK||currentUser.isAdmin;
-    const all=DB.getDrawings();
-    const idx=all.findIndex(x=>x.id===drawingId);
-    if(idx===-1)return;
-    const c=all[idx].comments?.find(x=>x.id===cid);
+    const d=DB.getDrawings().find(x=>x.id===drawingId);
+    if(!d)return;
+    const c=d.comments?.find(x=>x.id===cid);
     if(!c)return;
     if(c.userId!==currentUser.id&&!isAdmin)return;
-    all[idx].comments=all[idx].comments.filter(x=>x.id!==cid);
-    DB.saveDrawings(all);
+    const updated={...d,comments:d.comments.filter(x=>x.id!==cid)};
+    await DB.saveDrawing(updated);
     loadComments();
   };
 
@@ -513,8 +644,8 @@ function ViewModal({d,onClose,currentUser,onLike,onFavorite,onViewed}){
   useEffect(()=>{
     if(!didView.current){
       didView.current=true;
-      const updated=onViewed(d.id);
-      if(updated)setLocalD({...updated,comments:updated.comments||[]});
+      // onViewed is now async — result comes via cache refresh
+      onViewed(d.id);
     }
     const t=setInterval(()=>{
       const fresh=DB.getDrawings().find(x=>x.id===d.id);
@@ -523,7 +654,7 @@ function ViewModal({d,onClose,currentUser,onLike,onFavorite,onViewed}){
     return()=>clearInterval(t);
   },[]);
 
-  const authorUser=useMemo(()=>getUserById(localD.authorId),[localD.authorId]);
+  const authorUser=useMemo(()=>getUserById(localD.authorId),[localD.authorId,localD]);
   const fc=authorUser?.frame?SHOP_ITEMS.find(i=>i.id===authorUser.frame)?.color:null;
   const isRainbow=fc==='rainbow';
   const liked=(localD.likedBy||[]).includes(currentUser.id);
@@ -539,8 +670,8 @@ function ViewModal({d,onClose,currentUser,onLike,onFavorite,onViewed}){
   });
   const commentCount=(localD.comments||[]).length;
 
-  const handleLike=()=>{if(isOwn)return;const r=onLike(localD.id);if(r)setLocalD({...r,comments:r.comments||[]})};
-  const handleFav=()=>{onFavorite(localD.id);const f=DB.getDrawings().find(x=>x.id===localD.id);if(f)setLocalD({...f,comments:f.comments||[]})};
+  const handleLike=async()=>{if(isOwn)return;await onLike(localD.id)};
+  const handleFav=async()=>{await onFavorite(localD.id)};
 
   const imgBorder=isRainbow
     ?{border:'4px solid #f00',borderRadius:8,overflow:'hidden',animation:'rainbowBorder 3s linear infinite'}
@@ -789,32 +920,28 @@ function ArtJam({currentUser,showToast}){
   const load=()=>setJams([...DB.getJams()].reverse());
   useEffect(()=>{load();const t=setInterval(load,2000);return()=>clearInterval(t)},[]);
 
-  const handlePost=()=>{
+  const handlePost=async()=>{
     if(!title.trim())return;
     const post={id:'j_'+Date.now(),title:title.trim(),body:body.trim(),author:currentUser.nick,createdAt:Date.now()};
-    const all=DB.getJams();all.push(post);DB.saveJams(all);
-    setTitle('');setBody('');load();showToast('📢 Post published!');
+    await DB.saveJam(post);
+    setTitle('');setBody('');showToast('📢 Post published!');
   };
 
-  const handleVerify=(give)=>{
+  const handleVerify=async(give)=>{
     const nick=verifyNick.trim();
     if(!nick){setVerifyMsg('⚠️ Enter a username');return;}
-    const users=DB.getUsers();
-    const entry=Object.values(users).find(u=>u.nick.toLowerCase()===nick.toLowerCase());
+    const entry=Object.values(DB.getUsers()).find(u=>u.nick.toLowerCase()===nick.toLowerCase());
     if(!entry){setVerifyMsg('❌ User not found');return;}
     const inv=entry.inventory||[];
-    const hasVerified=entry.acc==='acc_verified';
     if(give){
-      // grant verified: add to inventory + equip
       const newInv=inv.includes('acc_verified')?inv:[...inv,'acc_verified'];
-      DB.updateUser(entry.email,{inventory:newInv,acc:'acc_verified'});
+      await DB.updateUser(entry.email,{inventory:newInv,acc:'acc_verified'});
       setVerifyMsg(`✅ ${nick} is now Verified!`);
-      showToast(`✅ Verified granted → ${nick}`,'#5599ff');
+      showToast(`✅ Verified granted → ${nick}`,'#1d9bf0');
     }else{
-      // revoke verified
       const newInv=inv.filter(id=>id!=='acc_verified');
       const newAcc=entry.acc==='acc_verified'?null:entry.acc;
-      DB.updateUser(entry.email,{inventory:newInv,acc:newAcc});
+      await DB.updateUser(entry.email,{inventory:newInv,acc:newAcc});
       setVerifyMsg(`🚫 Verified removed from ${nick}`);
       showToast(`🚫 Verified revoked ← ${nick}`,'#e85d75');
     }
@@ -822,18 +949,17 @@ function ArtJam({currentUser,showToast}){
     setTimeout(()=>setVerifyMsg(''),3000);
   };
 
-  const handleDelete=id=>{
+  const handleDelete=async id=>{
     if(!window.confirm('Delete this post?'))return;
-    DB.saveJams(DB.getJams().filter(j=>j.id!==id));load();showToast('🗑️ Post deleted','#e85d75');
+    await DB.deleteJam(id);showToast('🗑️ Post deleted','#e85d75');
   };
 
-  const handleGive=()=>{
+  const handleGive=async()=>{
     const nick=giveNick.trim();const amount=parseInt(giveCoins,10);
     if(!nick||isNaN(amount)||amount<=0){setGiveMsg('⚠️ Enter valid data');return}
-    const users=DB.getUsers();
-    const entry=Object.values(users).find(u=>u.nick.toLowerCase()===nick.toLowerCase());
+    const entry=Object.values(DB.getUsers()).find(u=>u.nick.toLowerCase()===nick.toLowerCase());
     if(!entry){setGiveMsg('❌ User not found');return}
-    DB.updateUser(entry.email,{coins:(entry.coins||0)+amount});
+    await DB.updateUser(entry.email,{coins:(entry.coins||0)+amount});
     setGiveMsg(`✅ ${nick} received ${amount} coins!`);
     setGiveNick('');setGiveCoins('');
     showToast(`💰 Gave ${amount} coins → ${nick}`,'#ffd166');
@@ -949,23 +1075,21 @@ function Settings({user,setUser,showToast,onLogout}){
   const [bio,setBio]=useState(user.bio||'');
   const [saved,setSaved]=useState(false);
 
-  const saveBio=()=>{
-    const updated=DB.updateUser(user.email,{bio:bio.trim()});
+  const saveBio=async()=>{
+    const updated=await DB.updateUser(user.email,{bio:bio.trim()});
     if(updated){setUser({...updated});setSaved(true);setTimeout(()=>setSaved(false),2000);showToast('✅ Profile saved','#06d6a0')}
   };
 
-  const handleDeleteAccount=()=>{
+  const handleDeleteAccount=async()=>{
     const confirm1=window.confirm('Delete account? This is IRREVERSIBLE. All your artworks will also be deleted!');
     if(!confirm1)return;
     const confirm2=window.prompt(`Type your username "${user.nick}" to confirm deletion:`);
     if(confirm2!==user.nick){alert('Username does not match. Deletion cancelled.');return}
-    // delete all drawings
-    const drawings=DB.getDrawings().filter(d=>d.authorId!==user.id);
-    DB.saveDrawings(drawings);
-    // delete user
-    const users=DB.getUsers();
-    delete users[user.email];
-    DB.saveUsers(users);
+    // delete all drawings by this user from Firebase
+    const myDrawings=DB.getDrawings().filter(d=>d.authorId===user.id);
+    await Promise.all(myDrawings.map(d=>DB.deleteDrawing(d.id)));
+    // delete user node from Firebase
+    await firebase.database().ref('users/'+DB.emailKey(user.email)).remove();
     onLogout();
   };
 
@@ -1125,6 +1249,7 @@ function Profile({user,drawings,onViewDrawing,onDeleteDrawing,isAdmin}){
           </div>
         )}
       </div>
+      <LevelCard user={user} drawings={drawings}/>
       <div style={{display:'flex',borderBottom:'1px solid rgba(255,255,255,.06)',marginBottom:18,overflowX:'auto'}}>
         {TABS.map(([k,l])=>(<button key={k} className={'tab-btn'+(tab===k?' active':'')} onClick={()=>setTab(k)}>{l}</button>))}
       </div>
@@ -1158,33 +1283,37 @@ function AuthScreen({onLogin}){
   const [nick,setNick]=useState('');
   const [err,setErr]=useState('');
   const [loading,setLoading]=useState(false);
-  const submit=()=>{
+  const submit=async()=>{
     setErr('');setLoading(true);
-    setTimeout(()=>{
-      try{
-        const users=DB.getUsers();
-        if(mode==='register'){
-          if(!email||!pw||!nick)return setErr('Fill in all fields');
-          if(pw.length<6)return setErr('Password must be at least 6 characters');
-          if(!/\S+@\S+\.\S+/.test(email))return setErr('Invalid email');
-          if(users[email])return setErr('Email already taken');
-          if(Object.values(users).some(u=>u.nick.toLowerCase()===nick.toLowerCase()))return setErr('Username already taken');
-          const isAdmin=nick===ADMIN_NICK;
-          const user={id:'u_'+Date.now(),email,pw,nick,coins:10,inventory:isAdmin?['title_legend']:[],
-            badge:null,frame:null,palette:'default',canvasSize:32,galleryZoom:'md',
-            title:isAdmin?'title_legend':null,favorites:[],bio:'',isAdmin,adminTitle:isAdmin,joinedAt:Date.now()};
-          users[email]=user;DB.saveUsers(users);DB.ensureAdmin();onLogin({...user});
-        }else{
-          if(!email||!pw)return setErr('Enter email and password');
-          const user=users[email];
-          if(!user||user.pw!==pw)return setErr('Incorrect email or password');
-          DB.ensureAdmin();
-          let m={galleryZoom:'md',title:null,favorites:[],bio:'',...user};
-          if(m.nick===ADMIN_NICK&&!m.isAdmin){m.isAdmin=true;m.adminTitle=true;users[email]=m;DB.saveUsers(users)}
-          onLogin({...m});
+    try{
+      const users=DB.getUsers();
+      if(mode==='register'){
+        if(!email||!pw||!nick){setErr('Fill in all fields');return}
+        if(pw.length<6){setErr('Password must be at least 6 characters');return}
+        if(!/\S+@\S+\.\S+/.test(email)){setErr('Invalid email');return}
+        if(users[DB.emailKey(email)]){setErr('Email already taken');return}
+        if(Object.values(users).some(u=>u.nick.toLowerCase()===nick.toLowerCase())){setErr('Username already taken');return}
+        const isAdmin=nick===ADMIN_NICK;
+        const user={id:'u_'+Date.now(),email,pw,nick,coins:10,inventory:isAdmin?['title_legend']:[],
+          badge:null,frame:null,palette:'default',canvasSize:32,galleryZoom:'md',
+          title:isAdmin?'title_legend':null,favorites:[],bio:'',isAdmin,adminTitle:isAdmin,joinedAt:Date.now()};
+        await DB.saveUser(email,user);
+        await DB.ensureAdmin();
+        onLogin({...user});
+      }else{
+        if(!email||!pw){setErr('Enter email and password');return}
+        const user=users[DB.emailKey(email)];
+        if(!user||user.pw!==pw){setErr('Incorrect email or password');return}
+        let m={galleryZoom:'md',title:null,favorites:[],bio:'',...user};
+        if(m.nick===ADMIN_NICK&&!m.isAdmin){
+          m.isAdmin=true;m.adminTitle=true;
+          await DB.saveUser(email,m);
         }
-      }finally{setLoading(false);}
-    },80);
+        await DB.ensureAdmin();
+        onLogin({...m});
+      }
+    }catch(e){setErr('Connection error. Check your Firebase config.');}
+    finally{setLoading(false);}
   };
   const inp={background:'rgba(255,255,255,.04)',border:'1px solid rgba(255,255,255,.09)',borderRadius:10,padding:'12px 15px',color:'#fff',fontSize:13,width:'100%',display:'block',transition:'border-color .2s'};
   return(
@@ -1224,26 +1353,377 @@ function AuthScreen({onLogin}){
 }
 
 /* ════════════════════════════════════════════════════════
+   LEVEL / XP  system
+════════════════════════════════════════════════════════ */
+function calcLevel(user,drawings){
+  const mine=drawings.filter(d=>d.authorId===user.id);
+  const totalLikes=mine.reduce((s,d)=>s+(d.likedBy||[]).length,0);
+  const totalViews=mine.reduce((s,d)=>s+(d.views||0),0);
+  const xp=mine.length*50+totalLikes*10+totalViews*2+(user.coins||0)*1;
+  const level=Math.floor(Math.sqrt(xp/120))+1;
+  const xpForLevel=n=>120*(n-1)*(n-1);
+  const cur=xpForLevel(level),next=xpForLevel(level+1);
+  const pct=Math.min(100,Math.round((xp-cur)/(next-cur)*100));
+  return{xp,level,pct,next:next-cur,cur:xp-cur};
+}
+const RANK_COLORS={1:'#ffd700',2:'#c0c0c0',3:'#cd7f32'};
+const LEVEL_TITLES={1:'Pixel Infant',3:'Doodler',5:'Sketcher',8:'Artisan',12:'Pixel Wizard',18:'Grand Master',25:'Pixel God'};
+function getLevelTitle(lv){
+  const keys=Object.keys(LEVEL_TITLES).map(Number).sort((a,b)=>b-a);
+  for(const k of keys)if(lv>=k)return LEVEL_TITLES[k];
+  return 'Pixel Infant';
+}
+
+/* ════════════════════════════════════════════════════════
+   LEADERBOARD
+════════════════════════════════════════════════════════ */
+function Leaderboard({drawings,currentUserId}){
+  const [tab,setTab]=useState('xp');
+  const users=useMemo(()=>Object.values(DB.getUsers()),[]);
+
+  const ranked=useMemo(()=>{
+    if(tab==='xp'){
+      return users.map(u=>{
+        const{xp,level}=calcLevel(u,drawings);
+        return{...u,xp,level};
+      }).sort((a,b)=>b.xp-a.xp).slice(0,20);
+    }
+    if(tab==='coins'){
+      return [...users].sort((a,b)=>(b.coins||0)-(a.coins||0)).slice(0,20);
+    }
+    if(tab==='art'){
+      return users.map(u=>({...u,artCount:drawings.filter(d=>d.authorId===u.id).length}))
+        .sort((a,b)=>b.artCount-a.artCount).slice(0,20);
+    }
+    if(tab==='likes'){
+      return users.map(u=>{
+        const mine=drawings.filter(d=>d.authorId===u.id);
+        const likes=mine.reduce((s,d)=>s+(d.likedBy||[]).length,0);
+        return{...u,likes};
+      }).sort((a,b)=>b.likes-a.likes).slice(0,20);
+    }
+    return[];
+  },[tab,users,drawings]);
+
+  const getVal=u=>{
+    if(tab==='xp')    return `${(u.xp||0).toLocaleString()} XP · Lv.${u.level}`;
+    if(tab==='coins') return `💰 ${(u.coins||0).toLocaleString()}`;
+    if(tab==='art')   return `🎨 ${u.artCount||0} artworks`;
+    if(tab==='likes') return `❤️ ${u.likes||0} likes`;
+    return '';
+  };
+
+  return(
+    <div>
+      <h1 style={{fontFamily:"'Bebas Neue',cursive",fontSize:40,letterSpacing:3,margin:'0 0 4px'}}>LEADERBOARD</h1>
+      <p style={{color:'#333',fontSize:11,marginBottom:22}}>Top players across all categories</p>
+      <div style={{display:'flex',gap:8,marginBottom:22,flexWrap:'wrap'}}>
+        {[['xp','⚡ XP'],['coins','💰 Coins'],['art','🎨 Art'],['likes','❤️ Likes']].map(([k,l])=>(
+          <button key={k} onClick={()=>setTab(k)}
+            style={{background:tab===k?'rgba(255,107,53,.15)':'rgba(255,255,255,.03)',border:'1px solid '+(tab===k?'rgba(255,107,53,.5)':'rgba(255,255,255,.08)'),borderRadius:9,padding:'8px 16px',color:tab===k?'#ff6b35':'#555',fontSize:12,fontWeight:tab===k?700:400,transition:'all .2s'}}>
+            {l}
+          </button>
+        ))}
+      </div>
+      <div style={{display:'flex',flexDirection:'column',gap:4}}>
+        {ranked.map((u,i)=>{
+          const isSelf=u.id===currentUserId;
+          const medal=RANK_COLORS[i+1];
+          return(
+            <div key={u.id} className="rank-row"
+              style={{display:'flex',alignItems:'center',gap:14,padding:'13px 18px',background:isSelf?'rgba(255,107,53,.07)':'rgba(255,255,255,.02)',border:'1px solid '+(isSelf?'rgba(255,107,53,.25)':'rgba(255,255,255,.05)'),borderRadius:12}}>
+              <div style={{width:32,textAlign:'center',fontFamily:"'Bebas Neue',cursive",fontSize:20,color:medal||'#333',flexShrink:0,textShadow:medal?`0 0 10px ${medal}66`:'none'}}>
+                {i===0?'🥇':i===1?'🥈':i===2?'🥉':`#${i+1}`}
+              </div>
+              <div style={{width:36,height:36,borderRadius:9,background:`linear-gradient(135deg,${['#ff6b35','#bf5fff','#06d6a0','#ffd166','#00d4ff'][i%5]},#1a1a2e)`,display:'flex',alignItems:'center',justifyContent:'center',fontFamily:"'Bebas Neue',cursive",fontSize:18,flexShrink:0}}>
+                {u.nick[0].toUpperCase()}
+              </div>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{display:'flex',alignItems:'center',gap:6}}>
+                  <NickDisplay userId={u.id} nick={u.nick} size={13}/>
+                  {isSelf&&<span style={{fontSize:9,background:'rgba(255,107,53,.2)',border:'1px solid rgba(255,107,53,.4)',borderRadius:4,padding:'1px 6px',color:'#ff6b35',letterSpacing:1}}>YOU</span>}
+                </div>
+                <div style={{fontSize:11,color:'#444',marginTop:2}}>{getVal(u)}</div>
+              </div>
+            </div>
+          );
+        })}
+        {ranked.length===0&&<div style={{textAlign:'center',padding:'50px 0',color:'#222',fontSize:12}}>No data yet</div>}
+      </div>
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════════════════════
+   NOTIFICATIONS  panel
+════════════════════════════════════════════════════════ */
+function NotifPanel({userId,onClose}){
+  const [notifs,setNotifs]=useState([]);
+  const [loading,setLoading]=useState(true);
+
+  useEffect(()=>{
+    DB.getNotifs(userId).then(n=>{setNotifs(n);setLoading(false);});
+    DB.markNotifsRead(userId);
+  },[userId]);
+
+  const handleDelete=async(id)=>{
+    await DB.deleteNotif(userId,id);
+    setNotifs(p=>p.filter(n=>n.id!==id));
+  };
+
+  const typeIcon={like:'❤️',comment:'💬',follow:'👤',coin:'💰',verify:'✅',challenge:'🏆'};
+  const typeColor={like:'#e85d75',comment:'#5599ff',follow:'#06d6a0',coin:'#ffd166',verify:'#1d9bf0',challenge:'#ffd700'};
+
+  return(
+    <div onClick={onClose} style={{position:'fixed',inset:0,background:'rgba(0,0,0,.7)',zIndex:500,display:'flex',justifyContent:'flex-end',alignItems:'flex-start',padding:'60px 16px 0'}}>
+      <div onClick={e=>e.stopPropagation()} className="modal-in"
+        style={{background:'#0b0b1a',border:'1px solid rgba(255,255,255,.1)',borderRadius:18,width:'100%',maxWidth:380,maxHeight:'80vh',overflowY:'auto',boxShadow:'0 20px 60px rgba(0,0,0,.8)'}}>
+        <div style={{padding:'18px 20px',borderBottom:'1px solid rgba(255,255,255,.06)',display:'flex',justifyContent:'space-between',alignItems:'center',position:'sticky',top:0,background:'#0b0b1a',zIndex:1}}>
+          <span style={{fontFamily:"'Bebas Neue',cursive",fontSize:22,letterSpacing:2}}>NOTIFICATIONS</span>
+          <button onClick={onClose} style={{background:'none',border:'none',color:'#555',fontSize:18}}>✕</button>
+        </div>
+        {loading?(
+          <div style={{padding:40,textAlign:'center',color:'#333',fontSize:11}}>Loading...</div>
+        ):notifs.length===0?(
+          <div style={{padding:40,textAlign:'center',color:'#222',fontSize:12}}>All quiet here 🌙</div>
+        ):(
+          <div style={{padding:12,display:'flex',flexDirection:'column',gap:6}}>
+            {notifs.map(n=>(
+              <div key={n.id} className="notif-card"
+                style={{display:'flex',alignItems:'flex-start',gap:12,padding:'12px 14px',background:n.read?'transparent':'rgba(255,255,255,.03)',border:'1px solid '+(n.read?'rgba(255,255,255,.04)':'rgba(255,255,255,.1)'),borderRadius:12,position:'relative'}}>
+                <div style={{width:34,height:34,borderRadius:8,background:`${typeColor[n.type]||'#666'}22`,border:`1px solid ${typeColor[n.type]||'#666'}44`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:16,flexShrink:0}}>
+                  {typeIcon[n.type]||'🔔'}
+                </div>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:12,color:'#ccc',lineHeight:1.5}}>{n.text}</div>
+                  <div style={{fontSize:10,color:'#333',marginTop:3}}>{new Date(n.createdAt).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</div>
+                </div>
+                <button onClick={()=>handleDelete(n.id)}
+                  style={{background:'none',border:'none',color:'#333',fontSize:13,padding:'2px 4px',flexShrink:0,cursor:'pointer'}}
+                  title="Dismiss">✕</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════════════════════
+   CHALLENGES  page
+════════════════════════════════════════════════════════ */
+function Challenges({currentUser,drawings,showToast,isAdmin}){
+  const [challenges,setChallenges]=useState([]);
+  const [selected,setSelected]=useState(null);
+  const [entries,setEntries]=useState([]);
+  const [newTitle,setNewTitle]=useState('');
+  const [newDesc,setNewDesc]=useState('');
+  const [newDeadline,setNewDeadline]=useState('');
+  const [newPrize,setNewPrize]=useState('');
+  const [showCreate,setShowCreate]=useState(false);
+
+  useEffect(()=>{
+    DB.getChallenges().then(setChallenges);
+  },[]);
+
+  const loadEntries=async(challengeId)=>{
+    const e=await DB.getChallengeEntries(challengeId);
+    setEntries(e);
+  };
+
+  const handleSelect=ch=>{
+    setSelected(ch);
+    loadEntries(ch.id);
+  };
+
+  const handleCreate=async()=>{
+    if(!newTitle.trim())return;
+    const ch={id:'ch_'+Date.now(),title:newTitle.trim(),desc:newDesc.trim(),deadline:newDeadline||null,
+      prize:parseInt(newPrize,10)||0,author:currentUser.nick,createdAt:Date.now(),active:true};
+    await DB.saveChallenge(ch);
+    setChallenges(p=>[ch,...p]);
+    setNewTitle('');setNewDesc('');setNewDeadline('');setNewPrize('');setShowCreate(false);
+    showToast('🏆 Challenge created!','#ffd700');
+  };
+
+  const handleSubmit=async(drawingId)=>{
+    if(!selected)return;
+    const already=entries.some(e=>e.authorId===currentUser.id);
+    if(already){showToast('You already submitted to this challenge','#e85d75');return;}
+    const d=drawings.find(x=>x.id===drawingId);
+    if(!d)return;
+    const entry={id:'ce_'+Date.now(),drawingId,authorId:currentUser.id,
+      nick:currentUser.nick,title:d.title,data:d.data,createdAt:Date.now()};
+    await DB.submitChallenge(selected.id,entry);
+    if(selected.prize>0){
+      await DB.updateUser(currentUser.email,{coins:(currentUser.coins||0)+Math.floor(selected.prize*0.1)});
+      showToast(`🎖️ Submitted! +${Math.floor(selected.prize*0.1)} coins for participating`,'#ffd700');
+    }else showToast('🎖️ Submitted to challenge!','#ffd700');
+    loadEntries(selected.id);
+  };
+
+  const myDrawings=drawings.filter(d=>d.authorId===currentUser.id);
+  const isDeadlinePassed=ch=>ch.deadline&&new Date(ch.deadline)<new Date();
+
+  if(selected)return(
+    <div>
+      <button onClick={()=>setSelected(null)} style={{background:'none',border:'none',color:'#ff6b35',fontSize:12,cursor:'pointer',marginBottom:18,display:'flex',alignItems:'center',gap:6}}>
+        ← Back to Challenges
+      </button>
+      <div style={{background:'rgba(255,215,0,.05)',border:'1px solid rgba(255,215,0,.2)',borderRadius:16,padding:24,marginBottom:24}}>
+        <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:12,flexWrap:'wrap'}}>
+          <div>
+            <h2 style={{fontFamily:"'Bebas Neue',cursive",fontSize:32,color:'#ffd700',letterSpacing:2,marginBottom:6}}>{selected.title}</h2>
+            {selected.desc&&<p style={{color:'#888',fontSize:13,lineHeight:1.7,marginBottom:10}}>{selected.desc}</p>}
+            <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
+              {selected.prize>0&&<span style={{fontSize:12,color:'#ffd166'}}>🏆 Prize: {selected.prize} coins</span>}
+              {selected.deadline&&<span style={{fontSize:12,color:isDeadlinePassed(selected)?'#e85d75':'#06d6a0'}}>
+                ⏰ {isDeadlinePassed(selected)?'Ended':'Ends'}: {new Date(selected.deadline).toLocaleDateString()}
+              </span>}
+              <span style={{fontSize:12,color:'#555'}}>by {selected.author} · {entries.length} entries</span>
+            </div>
+          </div>
+          {!isDeadlinePassed(selected)&&myDrawings.length>0&&(
+            <div>
+              <div style={{fontSize:11,color:'#555',marginBottom:8,letterSpacing:1}}>SUBMIT YOUR ARTWORK</div>
+              <select onChange={e=>e.target.value&&handleSubmit(e.target.value)} defaultValue=""
+                style={{background:'rgba(255,255,255,.05)',border:'1px solid rgba(255,255,255,.12)',borderRadius:9,padding:'9px 13px',color:'#ddd',fontSize:12}}>
+                <option value="" disabled>Choose artwork...</option>
+                {myDrawings.map(d=><option key={d.id} value={d.id}>{d.title}</option>)}
+              </select>
+            </div>
+          )}
+        </div>
+      </div>
+      {entries.length===0?(
+        <div style={{textAlign:'center',padding:'50px 20px',color:'#222',fontSize:12}}>No entries yet — be the first!</div>
+      ):(
+        <div>
+          <div style={{fontSize:11,color:'#555',letterSpacing:2,marginBottom:14}}>ENTRIES ({entries.length})</div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(150px,1fr))',gap:10}}>
+            {entries.map(e=>(
+              <div key={e.id} style={{background:'rgba(255,255,255,.03)',border:'1px solid rgba(255,255,255,.07)',borderRadius:10,overflow:'hidden'}}>
+                <div style={{aspectRatio:'1',background:'#1a1a2e'}}>
+                  <img src={e.data} alt={e.title} style={{width:'100%',height:'100%',objectFit:'cover',imageRendering:'pixelated',display:'block'}}/>
+                </div>
+                <div style={{padding:'8px 10px'}}>
+                  <div style={{fontSize:11,color:'#ddd',marginBottom:2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{e.title}</div>
+                  <NickDisplay userId={e.authorId} nick={e.nick} size={10}/>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+  return(
+    <div>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:22,flexWrap:'wrap',gap:12}}>
+        <div>
+          <h1 style={{fontFamily:"'Bebas Neue',cursive",fontSize:40,letterSpacing:3,margin:0}}>CHALLENGES</h1>
+          <p style={{color:'#333',fontSize:11}}>Compete · Submit · Win prizes</p>
+        </div>
+        {isAdmin&&(
+          <button onClick={()=>setShowCreate(p=>!p)} className="glow-btn"
+            style={{background:'linear-gradient(135deg,#ffd700,#ff8c00)',border:'none',borderRadius:10,padding:'10px 20px',color:'#1a1a2e',fontWeight:800,fontSize:12}}>
+            🏆 New Challenge
+          </button>
+        )}
+      </div>
+      {isAdmin&&showCreate&&(
+        <div style={{background:'rgba(255,215,0,.05)',border:'1px solid rgba(255,215,0,.2)',borderRadius:16,padding:20,marginBottom:24,display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+          <input value={newTitle} onChange={e=>setNewTitle(e.target.value)} placeholder="Challenge title *" className="inp" style={{fontSize:13,gridColumn:'1/-1'}}/>
+          <textarea value={newDesc} onChange={e=>setNewDesc(e.target.value)} placeholder="Description..." rows={3}
+            style={{background:'rgba(255,255,255,.05)',border:'1px solid rgba(255,255,255,.1)',borderRadius:9,padding:'10px 14px',color:'#fff',fontSize:13,resize:'vertical',gridColumn:'1/-1'}}/>
+          <input value={newDeadline} onChange={e=>setNewDeadline(e.target.value)} type="date" className="inp" style={{fontSize:13}} placeholder="Deadline"/>
+          <input value={newPrize} onChange={e=>setNewPrize(e.target.value)} type="number" min="0" placeholder="💰 Prize coins" className="inp" style={{fontSize:13}}/>
+          <button onClick={handleCreate} className="glow-btn"
+            style={{background:'linear-gradient(135deg,#ffd700,#ff8c00)',border:'none',borderRadius:9,padding:'11px',color:'#1a1a2e',fontWeight:700,fontSize:13,gridColumn:'1/-1'}}>
+            🏆 Create Challenge
+          </button>
+        </div>
+      )}
+      {challenges.length===0?(
+        <div style={{textAlign:'center',padding:'60px 20px',color:'#222',fontSize:12}}>No challenges yet. Check back soon!</div>
+      ):(
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(280px,1fr))',gap:12}}>
+          {challenges.map(ch=>(
+            <div key={ch.id} onClick={()=>handleSelect(ch)} className={`card-hover${!isDeadlinePassed(ch)?' challenge-active':''}`}
+              style={{background:'rgba(255,215,0,.04)',border:`1px solid ${isDeadlinePassed(ch)?'rgba(255,255,255,.06)':'rgba(255,215,0,.2)'}`,borderRadius:16,padding:20,cursor:'pointer'}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:10}}>
+                <span style={{fontSize:11,letterSpacing:1,color:isDeadlinePassed(ch)?'#444':'#ffd700',fontWeight:700}}>
+                  {isDeadlinePassed(ch)?'ENDED':'🔥 ACTIVE'}
+                </span>
+                {ch.prize>0&&<span style={{fontSize:11,color:'#ffd166'}}>🏆 {ch.prize} coins</span>}
+              </div>
+              <h3 style={{fontFamily:"'Bebas Neue',cursive",fontSize:22,color:'#fff',letterSpacing:1,marginBottom:6}}>{ch.title}</h3>
+              {ch.desc&&<p style={{fontSize:11,color:'#555',marginBottom:10,lineHeight:1.6,overflow:'hidden',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical'}}>{ch.desc}</p>}
+              {ch.deadline&&<div style={{fontSize:11,color:isDeadlinePassed(ch)?'#333':'#06d6a0'}}>⏰ {new Date(ch.deadline).toLocaleDateString()}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════════════════════
+   LEVEL CARD  (shown in Profile)
+════════════════════════════════════════════════════════ */
+function LevelCard({user,drawings}){
+  const{xp,level,pct,cur,next}=calcLevel(user,drawings);
+  const title=getLevelTitle(level);
+  return(
+    <div style={{background:'rgba(255,255,255,.03)',border:'1px solid rgba(255,255,255,.07)',borderRadius:16,padding:20,marginBottom:18}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}>
+        <div>
+          <div style={{fontSize:11,color:'#555',letterSpacing:2,textTransform:'uppercase',marginBottom:4}}>Level Progress</div>
+          <div style={{display:'flex',alignItems:'baseline',gap:8}}>
+            <span style={{fontFamily:"'Bebas Neue',cursive",fontSize:40,color:'#ff6b35',lineHeight:1}}>{level}</span>
+            <span style={{fontSize:12,color:'#666'}}>{title}</span>
+          </div>
+        </div>
+        <div style={{textAlign:'right'}}>
+          <div style={{fontSize:11,color:'#444',marginBottom:2}}>{xp.toLocaleString()} XP total</div>
+          <div style={{fontSize:11,color:'#333'}}>{cur}/{next} to next level</div>
+        </div>
+      </div>
+      <div style={{background:'rgba(255,255,255,.06)',borderRadius:99,height:8,overflow:'hidden'}}>
+        <div className="xp-bar-fill" style={{'--xp-w':pct+'%',height:'100%',background:'linear-gradient(90deg,#ff6b35,#ffd166)',borderRadius:99,width:pct+'%'}}/>
+      </div>
+      <div style={{fontSize:10,color:'#333',marginTop:6,textAlign:'right'}}>{pct}%</div>
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════════════════════
    MAIN APP
 ════════════════════════════════════════════════════════ */
 function App(){
-  /* ── SESSION RESTORE: try to rehydrate from localStorage on mount ── */
-  const [user,setUserRaw]=useState(()=>{
-    try{
-      const email=localStorage.getItem('dc:session');
-      if(email){const u=DB.getUser(email);if(u)return{...u}}
-    }catch{}
-    return null;
-  });
+  /* ── SESSION RESTORE from localStorage ── */
+  const [user,setUserRaw]=useState(null);
+  const [appReady,setAppReady]=useState(false);
 
-  /* wrapper: every setUser also persists/clears the session */
   const setUser=useCallback((u)=>{
-    if(u){
-      try{localStorage.setItem('dc:session',u.email)}catch{}
-    }else{
-      try{localStorage.removeItem('dc:session')}catch{}
-    }
+    if(u) try{localStorage.setItem('dc:session',u.email)}catch{}
+    else  try{localStorage.removeItem('dc:session')}catch{}
     setUserRaw(u);
+  },[]);
+
+  // wait for Firebase cache to load, then restore session
+  useEffect(()=>{
+    DB.onReady(()=>{
+      try{
+        const email=localStorage.getItem('dc:session');
+        if(email){const u=DB.getUser(email);if(u)setUserRaw(u);}
+      }catch{}
+      setAppReady(true);
+      setDrawings(DB.getDrawings());
+      setLoading(false);
+    });
   },[]);
 
   const [page,setPage]=useState('gallery');
@@ -1256,111 +1736,109 @@ function App(){
   const [toast,setToast]=useState(null);
   const [loading,setLoading]=useState(true);
 
-  const showToast=(msg,color='#ff6b35')=>{setToast({msg,color,id:Date.now()});setTimeout(()=>setToast(null),3200)};
-  const refreshDrawings=()=>setDrawings(DB.getDrawings());
-  const refreshUser=()=>{
+  const [notifOpen,setNotifOpen]=useState(false);
+  const [notifCount,setNotifCount]=useState(0);
+
+  // poll unread notification count
+  useEffect(()=>{
+    if(!user)return;
+    const check=()=>DB.getNotifs(user.id).then(ns=>setNotifCount(ns.filter(n=>!n.read).length));
+    check();
+    const t=setInterval(check,8000);
+    return()=>clearInterval(t);
+  },[user]);
+  const refreshDrawings=()=>setDrawings([...DB.getDrawings()]);
+  const refreshUser=async()=>{
     if(!user)return;
     const f=DB.getUser(user.email);
-    if(f)setUser({...f}); // also re-saves session key
+    if(f)setUser({...f});
   };
 
-  useEffect(()=>{setDrawings(DB.getDrawings());setLoading(false);},[]);
-  useEffect(()=>{const t=setInterval(()=>DB.ensureAdmin(),5000);return()=>clearInterval(t)},[]);
-  // poll gallery every 3s so new artworks always show up
+  // Firebase realtime — drawings auto-update via listener
   useEffect(()=>{
-    const t=setInterval(()=>setDrawings(DB.getDrawings()),3000);
+    const t=setInterval(()=>setDrawings([...DB.getDrawings()]),1500);
     return()=>clearInterval(t);
   },[]);
+  useEffect(()=>{const t=setInterval(()=>DB.ensureAdmin(),10000);return()=>clearInterval(t)},[]);
 
   /* PUBLISH */
-  const handlePublish=(title,desc)=>{
+  const handlePublish=async(title,desc)=>{
     const vip=getUserVip(user);
-    const allCurrent=DB.getDrawings();
-    const mine=allCurrent.filter(d=>d.authorId===user.id);
+    const mine=DB.getDrawings().filter(d=>d.authorId===user.id);
     if(mine.length>=vip.workLimit){showToast(`⛔ Limit ${vip.workLimit} artworks. Buy 'Work Limit ×3' in shop!`,'#e85d75');return}
     const d={id:'d_'+Date.now(),title,description:desc||'',data:pendingImg,author:user.nick,authorId:user.id,
       views:0,viewedBy:[],likedBy:[],comments:[],gridSize:pendingSize,createdAt:Date.now()};
-    allCurrent.unshift(d);DB.saveDrawings(allCurrent);
-    // immediately update state so gallery shows it right away
-    setDrawings([...allCurrent]);
+    await DB.saveDrawing(d);
     setPendingImg(null);setPage('gallery');showToast('🎨 Artwork published!');
   };
 
   /* VIEW — anti-cheat: no self-view, unique per viewer */
-  const handleViewed=drawingId=>{
-    const all=DB.getDrawings();
-    const idx=all.findIndex(d=>d.id===drawingId);
-    if(idx===-1)return null;
-    const d=all[idx];
-    if(d.authorId===user.id)return d; // no self-view
+  const handleViewed=async(drawingId)=>{
+    const d=DB.getDrawings().find(x=>x.id===drawingId);
+    if(!d)return;
+    if(d.authorId===user.id)return;
     const viewedBy=d.viewedBy||[];
-    if(viewedBy.includes(user.id))return d; // already viewed
-    all[idx].viewedBy=[...viewedBy,user.id];
-    all[idx].views=(d.views||0)+1;
-    const nv=all[idx].views;
-    if(Math.floor(nv/10)>Math.floor((nv-1)/10)){
-      const usersDB=DB.getUsers();
-      const ae=Object.values(usersDB).find(u=>u.id===d.authorId);
+    if(viewedBy.includes(user.id))return;
+    const newViews=(d.views||0)+1;
+    const patch={views:newViews,viewedBy:[...viewedBy,user.id]};
+    await DB.updateDrawing(drawingId,patch);
+    if(Math.floor(newViews/10)>Math.floor((newViews-1)/10)){
+      const ae=Object.values(DB.getUsers()).find(u=>u.id===d.authorId);
       if(ae){
         const dbl=(ae.inventory||[]).includes('vip_doublecoin');
         const add=dbl?2:1;
-        DB.updateUser(ae.email,{coins:(ae.coins||0)+add});
-        if(user&&ae.id===user.id){refreshUser();showToast(`💰 +${add} coin${add>1?'s':''}${dbl?' (×2 VIP)':''}!`,'#ffd166')}
+        await DB.updateUser(ae.email,{coins:(ae.coins||0)+add});
+        if(ae.id===user.id){await refreshUser();showToast(`💰 +${add} coin${add>1?'s':''}${dbl?' (×2 VIP)':''}!`,'#ffd166')}
       }
     }
-    DB.saveDrawings(all);refreshDrawings();
-    return all[idx];
   };
 
   /* LIKE — no self-like */
-  const handleLike=drawingId=>{
-    const all=DB.getDrawings();
-    const idx=all.findIndex(d=>d.id===drawingId);
-    if(idx===-1)return null;
-    const d=all[idx];
-    if(d.authorId===user.id)return d;
+  const handleLike=async(drawingId)=>{
+    const d=DB.getDrawings().find(x=>x.id===drawingId);
+    if(!d||d.authorId===user.id)return;
     const likedBy=d.likedBy||[];
     const already=likedBy.includes(user.id);
     const hasSuperLike=(user.inventory||[]).includes('vip_superlike');
-    all[idx].likedBy=already?likedBy.filter(id=>id!==user.id):[...likedBy,user.id];
-    DB.saveDrawings(all);refreshDrawings();
+    await DB.updateDrawing(drawingId,{likedBy:already?likedBy.filter(id=>id!==user.id):[...likedBy,user.id]});
+    if(!already){
+      // notify artwork owner
+      DB.addNotif(d.authorId,{type:'like',text:`${user.nick} liked your artwork "${d.title}"`});
+    }
     if(already)showToast('💔 Like removed','#888');
     else if(hasSuperLike)showToast('⚡ Super Like! (×5 weight)',TIER.legendary.badge);
     else showToast('❤️ Liked!','#e85d75');
-    return all[idx];
   };
 
-  /* FAVORITE — no self-fav cheat on views */
-  const handleFavorite=drawingId=>{
+  /* FAVORITE */
+  const handleFavorite=async(drawingId)=>{
     const favs=user.favorites||[];
     const already=favs.includes(drawingId);
     const newFavs=already?favs.filter(id=>id!==drawingId):[...favs,drawingId];
-    const updated=DB.updateUser(user.email,{favorites:newFavs});
-    setUser({...updated});
+    const updated=await DB.updateUser(user.email,{favorites:newFavs});
+    if(updated)setUser({...updated});
     showToast(already?'☆ Removed from favorites':'⭐ Added to favorites','#ffd166');
   };
 
   /* DELETE DRAWING */
-  const handleDelete=d=>{
+  const handleDelete=async(d)=>{
     const isAdmin=user.nick===ADMIN_NICK||user.isAdmin;
     const isOwn=d.authorId===user.id;
     if(!isOwn&&!isAdmin)return;
     const label=isAdmin&&!isOwn?`[ADMIN] Delete artwork "${d.title}"?`:`Delete artwork "${d.title}"? This cannot be undone.`;
     if(!window.confirm(label))return;
-    const remaining=DB.getDrawings().filter(x=>x.id!==d.id);
-    DB.saveDrawings(remaining);
-    setDrawings([...remaining]);
+    await DB.deleteDrawing(d.id);
     if(viewing&&viewing.id===d.id)setViewing(null);
     showToast(`🗑️ Artwork deleted`,'#e85d75');
   };
 
   /* BUY / EQUIP */
-  const handleBuy=item=>{
+  const handleBuy=async(item)=>{
     if(user.coins<item.price||(user.inventory||[]).includes(item.id))return;
-    const updated=DB.updateUser(user.email,{coins:user.coins-item.price,inventory:[...(user.inventory||[]),item.id]});
-    setUser({...updated});showToast(`🛒 ${item.name} — purchased!`);
+    const updated=await DB.updateUser(user.email,{coins:user.coins-item.price,inventory:[...(user.inventory||[]),item.id]});
+    if(updated)setUser({...updated});showToast(`🛒 ${item.name} — purchased!`);
   };
-  const handleEquip=item=>{
+  const handleEquip=async(item)=>{
     const patch={};
     if(item.type==='badge')   patch.badge=item.id;
     if(item.type==='frame')   patch.frame=item.id;
@@ -1370,8 +1848,8 @@ function App(){
     if(item.type==='title')   patch.title=item.id;
     if(item.type==='acc')     patch.acc=item.id;
     if(item.type==='vip')     return;
-    const updated=DB.updateUser(user.email,patch);
-    setUser({...updated});showToast(`✨ ${item.name} — activated!`);
+    const updated=await DB.updateUser(user.email,patch);
+    if(updated)setUser({...updated});showToast(`✨ ${item.name} — activated!`);
   };
 
   /* SORTED GALLERY */
@@ -1388,9 +1866,15 @@ function App(){
   const galleryZoom=user?.galleryZoom||'md';
   const cardMinW={sm:130,md:190,lg:265,xl:330}[galleryZoom]||190;
 
-  if(!user)return <AuthScreen onLogin={u=>{setUser(u);refreshDrawings()}}/>;
+  if(!appReady)return(
+    <div style={{minHeight:'100vh',background:'#070712',display:'flex',alignItems:'center',justifyContent:'center',flexDirection:'column',gap:16}}>
+      <div style={{fontFamily:"'Press Start 2P'",fontSize:14,color:'#ff6b35',textShadow:'2px 2px 0 #7a2e10'}}>DC</div>
+      <div style={{fontSize:11,color:'#333',fontFamily:"'DM Mono',monospace",animation:'pulse 1.5s ease infinite'}}>Connecting to Firebase...</div>
+    </div>
+  );
+  if(!user)return <AuthScreen onLogin={u=>{setUser(u);}}/>;
 
-  const NAV=[['gallery','🗂','Gallery'],['draw','✏️','Draw'],['jam','🎪','Art Jam'],['shop','🛒','Shop'],['profile','👤','Profile'],['settings','⚙️','Settings']];
+  const NAV=[['gallery','🗂','Gallery'],['draw','✏️','Draw'],['jam','🎪','Art Jam'],['challenges','🏆','Challenges'],['leaderboard','🥇','Ranks'],['shop','🛒','Shop'],['profile','👤','Profile'],['settings','⚙️','Settings']];
 
   return(
     <div style={{minHeight:'100vh',background:'#070712',fontFamily:"'DM Mono',monospace",color:'#fff'}}>
@@ -1409,6 +1893,10 @@ function App(){
           ))}
         </div>
         <div style={{display:'flex',alignItems:'center',gap:7,flexShrink:0}}>
+          <button onClick={()=>setNotifOpen(true)} style={{position:'relative',background:'rgba(255,255,255,.04)',border:'1px solid rgba(255,255,255,.08)',borderRadius:7,padding:'5px 9px',color:'#888',fontSize:14}}>
+            🔔
+            {notifCount>0&&<span style={{position:'absolute',top:-4,right:-4,background:'#e85d75',borderRadius:'50%',width:16,height:16,fontSize:9,fontWeight:900,display:'flex',alignItems:'center',justifyContent:'center',color:'#fff',border:'2px solid #070712'}}>{notifCount>9?'9+':notifCount}</span>}
+          </button>
           {isAdmin&&<div style={{background:'rgba(255,0,0,.1)',border:'1px solid rgba(255,0,0,.3)',borderRadius:7,padding:'4px 9px',fontSize:9,color:'#ff2222',fontWeight:900,letterSpacing:1,whiteSpace:'nowrap'}}>ADMIN</div>}
           <button onClick={()=>setPage('shop')}
             style={{background:'rgba(255,209,102,.08)',border:'1px solid rgba(255,209,102,.18)',borderRadius:7,padding:'5px 12px',fontSize:12,color:'#ffd166',fontWeight:700}}>
@@ -1479,6 +1967,8 @@ function App(){
         )}
 
         {page==='jam'&&<ArtJam currentUser={user} showToast={showToast}/>}
+        {page==='challenges'&&<Challenges currentUser={user} drawings={drawings} showToast={showToast} isAdmin={isAdmin}/>}
+        {page==='leaderboard'&&<Leaderboard drawings={drawings} currentUserId={user.id}/>}
         {page==='shop'&&<Shop user={user} onBuy={handleBuy} onEquip={handleEquip} isAdmin={isAdmin}/>}
         {page==='profile'&&<Profile user={user} drawings={drawings} onViewDrawing={setViewing} onDeleteDrawing={handleDelete} isAdmin={isAdmin}/>}
         {page==='settings'&&<Settings user={user} setUser={setUser} showToast={showToast} onLogout={()=>setUser(null)}/>}
@@ -1486,6 +1976,7 @@ function App(){
 
       {pendingImg&&<PublishModal img={pendingImg} onPublish={handlePublish} onCancel={()=>setPendingImg(null)}/>}
       {viewing&&<ViewModal d={viewing} onClose={()=>setViewing(null)} currentUser={user} onViewed={handleViewed} onLike={handleLike} onFavorite={handleFavorite}/>}
+      {notifOpen&&<NotifPanel userId={user.id} onClose={()=>{setNotifOpen(false);setNotifCount(0);}}/>}
     </div>
   );
 }
