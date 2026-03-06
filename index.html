@@ -194,7 +194,7 @@ const SHOP_ITEMS=[
 
   /* ── PROFILE ACCESSORIES (new category) ── */
   {id:'acc_sparkle',    type:'acc',    tier:'common',    name:'Sparkle Trail',   desc:'Tiny sparkles follow your cursor',      price:15},
-  {id:'acc_verified',   type:'acc',    tier:'rare',      name:'Verified Badge',  desc:'Blue verified checkmark ✓',            price:50,   emoji:'✅'},
+  {id:'acc_verified',   type:'acc',    tier:'legendary', name:'Verified Badge',  desc:'Blue checkmark ✓ — admin grant only',  price:0,    emoji:'✅', adminOnly:true},
   {id:'acc_halo',       type:'acc',    tier:'rare',      name:'Halo',            desc:'Angel halo above avatar',               price:45,   emoji:'😇'},
   {id:'acc_wings',      type:'acc',    tier:'epic',      name:'Angel Wings',     desc:'Glowing wings on profile card',         price:90,   emoji:'🕊️'},
   {id:'acc_crown3d',    type:'acc',    tier:'legendary', name:'3D Crown',        desc:'Floating animated crown',               price:200,  emoji:'✨'},
@@ -666,7 +666,7 @@ function PublishModal({img,onPublish,onCancel}){
 /* ════════════════════════════════════════════════════════
    SHOP
 ════════════════════════════════════════════════════════ */
-function Shop({user,onBuy,onEquip}){
+function Shop({user,onBuy,onEquip,isAdmin}){
   const [filter,setFilter]=useState('all');
   const owned=user.inventory||[];
   const isEq=item=>{
@@ -674,12 +674,14 @@ function Shop({user,onBuy,onEquip}){
     if(item.type==='frame')   return user.frame===item.id;
     if(item.type==='palette') return user.palette===item.id.replace('palette_','');
     if(item.type==='canvas')  return item.id==='size_xl'?user.canvasSize===64:item.id==='size_xxl'?user.canvasSize===96:item.id==='size_mega'?user.canvasSize===128:item.id==='size_ultra'?user.canvasSize===256:false;
-    if(item.type==='zoom')    return user.galleryZoom===item.id.replace('zoom_','');
+    if(item.type==='zoom')    return user.galleryZoom===item.id.replace('zoom_','').replace('xs','sm');
     if(item.type==='title')   return user.title===item.id;
     if(item.type==='acc')     return user.acc===item.id;
     if(item.type==='vip')     return owned.includes(item.id);
     return false;
   };
+  // hide adminOnly items from regular users
+  const visibleItems=SHOP_ITEMS.filter(i=>!i.adminOnly||isAdmin);
   const groups=[
     {key:'vip',    label:'👑 VIP Perks',         isVip:true},
     {key:'title',  label:'📛 Titles'},
@@ -690,7 +692,7 @@ function Shop({user,onBuy,onEquip}){
     {key:'canvas', label:'📐 Canvases'},
     {key:'zoom',   label:'🔍 Gallery Zoom'},
   ];
-  const filtered=filter==='all'?SHOP_ITEMS:filter==='owned'?SHOP_ITEMS.filter(i=>owned.includes(i.id)):SHOP_ITEMS.filter(i=>i.tier===filter);
+  const filtered=filter==='all'?visibleItems:filter==='owned'?visibleItems.filter(i=>owned.includes(i.id)):visibleItems.filter(i=>i.tier===filter);
   return(
     <div>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:20,flexWrap:'wrap',gap:12}}>
@@ -781,6 +783,8 @@ function ArtJam({currentUser,showToast}){
   const [giveNick,setGiveNick]=useState('');
   const [giveCoins,setGiveCoins]=useState('');
   const [giveMsg,setGiveMsg]=useState('');
+  const [verifyNick,setVerifyNick]=useState('');
+  const [verifyMsg,setVerifyMsg]=useState('');
 
   const load=()=>setJams([...DB.getJams()].reverse());
   useEffect(()=>{load();const t=setInterval(load,2000);return()=>clearInterval(t)},[]);
@@ -790,6 +794,32 @@ function ArtJam({currentUser,showToast}){
     const post={id:'j_'+Date.now(),title:title.trim(),body:body.trim(),author:currentUser.nick,createdAt:Date.now()};
     const all=DB.getJams();all.push(post);DB.saveJams(all);
     setTitle('');setBody('');load();showToast('📢 Post published!');
+  };
+
+  const handleVerify=(give)=>{
+    const nick=verifyNick.trim();
+    if(!nick){setVerifyMsg('⚠️ Enter a username');return;}
+    const users=DB.getUsers();
+    const entry=Object.values(users).find(u=>u.nick.toLowerCase()===nick.toLowerCase());
+    if(!entry){setVerifyMsg('❌ User not found');return;}
+    const inv=entry.inventory||[];
+    const hasVerified=entry.acc==='acc_verified';
+    if(give){
+      // grant verified: add to inventory + equip
+      const newInv=inv.includes('acc_verified')?inv:[...inv,'acc_verified'];
+      DB.updateUser(entry.email,{inventory:newInv,acc:'acc_verified'});
+      setVerifyMsg(`✅ ${nick} is now Verified!`);
+      showToast(`✅ Verified granted → ${nick}`,'#5599ff');
+    }else{
+      // revoke verified
+      const newInv=inv.filter(id=>id!=='acc_verified');
+      const newAcc=entry.acc==='acc_verified'?null:entry.acc;
+      DB.updateUser(entry.email,{inventory:newInv,acc:newAcc});
+      setVerifyMsg(`🚫 Verified removed from ${nick}`);
+      showToast(`🚫 Verified revoked ← ${nick}`,'#e85d75');
+    }
+    setVerifyNick('');
+    setTimeout(()=>setVerifyMsg(''),3000);
   };
 
   const handleDelete=id=>{
@@ -822,7 +852,7 @@ function ArtJam({currentUser,showToast}){
 
       {/* ADMIN PANEL */}
       {isAdmin&&(
-        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16,marginBottom:28}}>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(240px,1fr))',gap:16,marginBottom:28}}>
           {/* new post */}
           <div style={{background:'rgba(255,34,34,.04)',border:'1px solid rgba(255,34,34,.2)',borderRadius:16,padding:20}}>
             <div style={{fontSize:12,color:'#ff4444',letterSpacing:1,textTransform:'uppercase',marginBottom:14,fontWeight:700}}>📢 New Post</div>
@@ -851,6 +881,30 @@ function ArtJam({currentUser,showToast}){
               {giveMsg&&(
                 <div style={{padding:'9px 13px',borderRadius:8,background:giveMsg.startsWith('✅')?'rgba(6,214,160,.1)':'rgba(255,70,70,.1)',border:'1px solid '+(giveMsg.startsWith('✅')?'rgba(6,214,160,.3)':'rgba(255,70,70,.3)'),color:giveMsg.startsWith('✅')?'#06d6a0':'#ff9090',fontSize:12}}>
                   {giveMsg}
+                </div>
+              )}
+            </div>
+          </div>
+          {/* verify badge */}
+          <div style={{background:'rgba(85,153,255,.05)',border:'1px solid rgba(85,153,255,.25)',borderRadius:16,padding:20}}>
+            <div style={{fontSize:12,color:'#5599ff',letterSpacing:1,textTransform:'uppercase',marginBottom:6,fontWeight:700}}>✅ Verified Badge</div>
+            <div style={{fontSize:11,color:'#333',marginBottom:14,lineHeight:1.6}}>Grant or revoke the blue ✅ badge.<br/>Only you can do this.</div>
+            <div style={{display:'flex',flexDirection:'column',gap:9}}>
+              <input value={verifyNick} onChange={e=>setVerifyNick(e.target.value)} placeholder="Player username" className="inp" style={{fontSize:13}}
+                onKeyDown={e=>e.key==='Enter'&&handleVerify(true)}/>
+              <div style={{display:'flex',gap:8}}>
+                <button onClick={()=>handleVerify(true)} className="glow-btn"
+                  style={{flex:1,background:'linear-gradient(135deg,#5599ff,#3366cc)',border:'none',borderRadius:9,padding:'10px',color:'#fff',fontWeight:700,fontSize:12}}>
+                  ✅ Grant
+                </button>
+                <button onClick={()=>handleVerify(false)}
+                  style={{flex:1,background:'rgba(255,70,70,.12)',border:'1px solid rgba(255,70,70,.3)',borderRadius:9,padding:'10px',color:'#ff6666',fontWeight:700,fontSize:12}}>
+                  🚫 Revoke
+                </button>
+              </div>
+              {verifyMsg&&(
+                <div style={{padding:'9px 13px',borderRadius:8,background:verifyMsg.startsWith('✅')?'rgba(85,153,255,.1)':'rgba(255,70,70,.1)',border:'1px solid '+(verifyMsg.startsWith('✅')?'rgba(85,153,255,.3)':'rgba(255,70,70,.3)'),color:verifyMsg.startsWith('✅')?'#5599ff':'#ff9090',fontSize:12}}>
+                  {verifyMsg}
                 </div>
               )}
             </div>
@@ -1212,16 +1266,24 @@ function App(){
 
   useEffect(()=>{setDrawings(DB.getDrawings());setLoading(false);},[]);
   useEffect(()=>{const t=setInterval(()=>DB.ensureAdmin(),5000);return()=>clearInterval(t)},[]);
+  // poll gallery every 3s so new artworks always show up
+  useEffect(()=>{
+    const t=setInterval(()=>setDrawings(DB.getDrawings()),3000);
+    return()=>clearInterval(t);
+  },[]);
 
   /* PUBLISH */
   const handlePublish=(title,desc)=>{
     const vip=getUserVip(user);
-    const mine=drawings.filter(d=>d.authorId===user.id);
+    const allCurrent=DB.getDrawings();
+    const mine=allCurrent.filter(d=>d.authorId===user.id);
     if(mine.length>=vip.workLimit){showToast(`⛔ Limit ${vip.workLimit} artworks. Buy 'Work Limit ×3' in shop!`,'#e85d75');return}
     const d={id:'d_'+Date.now(),title,description:desc||'',data:pendingImg,author:user.nick,authorId:user.id,
       views:0,viewedBy:[],likedBy:[],comments:[],gridSize:pendingSize,createdAt:Date.now()};
-    const all=DB.getDrawings();all.unshift(d);DB.saveDrawings(all);
-    setPendingImg(null);refreshDrawings();setPage('gallery');showToast('🎨 Artwork published!');
+    allCurrent.unshift(d);DB.saveDrawings(allCurrent);
+    // immediately update state so gallery shows it right away
+    setDrawings([...allCurrent]);
+    setPendingImg(null);setPage('gallery');showToast('🎨 Artwork published!');
   };
 
   /* VIEW — anti-cheat: no self-view, unique per viewer */
@@ -1285,8 +1347,9 @@ function App(){
     if(!isOwn&&!isAdmin)return;
     const label=isAdmin&&!isOwn?`[ADMIN] Delete artwork "${d.title}"?`:`Delete artwork "${d.title}"? This cannot be undone.`;
     if(!window.confirm(label))return;
-    DB.saveDrawings(DB.getDrawings().filter(x=>x.id!==d.id));
-    refreshDrawings();
+    const remaining=DB.getDrawings().filter(x=>x.id!==d.id);
+    DB.saveDrawings(remaining);
+    setDrawings([...remaining]);
     if(viewing&&viewing.id===d.id)setViewing(null);
     showToast(`🗑️ Artwork deleted`,'#e85d75');
   };
@@ -1416,7 +1479,7 @@ function App(){
         )}
 
         {page==='jam'&&<ArtJam currentUser={user} showToast={showToast}/>}
-        {page==='shop'&&<Shop user={user} onBuy={handleBuy} onEquip={handleEquip}/>}
+        {page==='shop'&&<Shop user={user} onBuy={handleBuy} onEquip={handleEquip} isAdmin={isAdmin}/>}
         {page==='profile'&&<Profile user={user} drawings={drawings} onViewDrawing={setViewing} onDeleteDrawing={handleDelete} isAdmin={isAdmin}/>}
         {page==='settings'&&<Settings user={user} setUser={setUser} showToast={showToast} onLogout={()=>setUser(null)}/>}
       </main>
